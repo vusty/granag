@@ -42,19 +42,34 @@ answers "is Granola recording, or merely running" without any Granola API. It
 also tells a meeting from a game: if Discord holds the microphone, nobody wants
 a transcript.
 
-## The open question
+## What the trigger turned out to be
 
-The meter only reports while the device's audio engine is running, which means
-while some application is capturing. With nothing capturing it reads a flat
-zero — so the level cannot, on its own, tell that a conversation started.
+The level is not part of it. `IAudioMeterInformation` only reports while the
+device's audio engine is running, which means while some application is already
+capturing — with nothing capturing it reads a flat zero even as you talk into an
+unmuted microphone, measured on 2026-09-03. And the small floor it returns
+otherwise, around 0.0002, is what digital silence reads: it looks the same
+whether the engine is asleep or the microphone is muted in hardware, so it
+cannot tell those apart either.
 
-That leaves two shapes for the trigger, and they differ in what they cost:
+So by the time the level could confirm a conversation, the consent store has
+already said so. The trigger is the consent store alone: an application other
+than Granola holds the microphone. That fires when the call starts rather than
+after the first sentences, costs a dozen registry reads every couple of seconds,
+and never lights the microphone indicator.
 
-- **The consent store alone.** Fire when an application other than Granola
-  holds the microphone. Free, invisible, and it fires when the call starts
-  rather than after the first sentences. Blind to a meeting in the same room,
-  where nothing captures at all.
-- **Our own capture stream.** Hold a shared-mode stream open so the meter
-  always answers, and detect speech directly. Covers the room, at the price of
-  the Windows microphone indicator burning permanently and this tool sitting in
-  the list of applications listening to the microphone.
+NVIDIA Broadcast has to be ignored for this to work. It opens the physical
+microphone on demand, when something takes its virtual one, so it shows up
+*alongside* the real client — counted naively, every call would look like two,
+and Broadcast sitting idle would look like a call.
+
+The level survives for two things: telling a broken audio path from a quiet room
+(a long, perfect zero while a call is under way means the pipeline is dead, not
+that nobody is talking), and a possible in-room mode, where the tool would hold
+its own capture stream and so be the capturer the meter needs. That mode would
+light the microphone indicator permanently, which is why it is not the default.
+
+## Not done yet
+
+The tray icon and its pause toggle, the Start Menu shortcut that would give the
+toast its own name and make buttons inside it possible, and autostart.

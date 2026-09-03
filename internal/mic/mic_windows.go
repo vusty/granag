@@ -19,12 +19,12 @@ import (
 )
 
 const (
-	eCapture           = 1
-	deviceStateActive  = 0x1
-	stgmRead           = 0
-	clsCtxAll          = 23
-	vtLPWSTR           = 31
-	pidDeviceFriendly  = 14
+	eCapture          = 1
+	deviceStateActive = 0x1
+	stgmRead          = 0
+	clsCtxAll         = 23
+	vtLPWSTR          = 31
+	pidDeviceFriendly = 14
 )
 
 var (
@@ -49,10 +49,10 @@ type propertyKey struct {
 // trailing padding keeps the struct at least as large as the real union, so
 // the callee never writes past it.
 type propVariant struct {
-	vt    uint16
-	_     [3]uint16
-	val   uintptr
-	_     uintptr
+	vt  uint16
+	_   [3]uint16
+	val uintptr
+	_   uintptr
 }
 
 type enumeratorVtbl struct {
@@ -255,9 +255,23 @@ func friendlyName(dev *comObject) (string, error) {
 	if pv.vt != vtLPWSTR || pv.val == 0 {
 		return "", fmt.Errorf("FriendlyName: unexpected variant type %d", pv.vt)
 	}
-	defer windows.CoTaskMemFree(unsafe.Pointer(pv.val))
+	name := lpwstr(pv.val)
+	defer windows.CoTaskMemFree(unsafe.Pointer(name))
 
-	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(pv.val))), nil
+	return windows.UTF16PtrToString(name), nil
+}
+
+// lpwstr reinterprets the PROPVARIANT union slot as the string it holds when
+// vt is VT_LPWSTR.
+//
+// The slot is typed uintptr rather than as a pointer on purpose: the callee
+// fills it with whatever the property's type calls for, and a garbage collector
+// scanning a slot that may hold an integer is a crash waiting for the wrong
+// property. That makes this conversion the one place go vet's unsafeptr check
+// complains about, and there it is a false positive - the memory belongs to
+// CoTaskMemAlloc, not to Go, and the caller frees it.
+func lpwstr(v uintptr) *uint16 {
+	return (*uint16)(unsafe.Pointer(v))
 }
 
 // Find returns the single active capture endpoint whose name contains match,

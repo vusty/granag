@@ -4,11 +4,13 @@
 // recording in Granola when a conversation is under way and Granola is not
 // capturing.
 //
-// This build carries the two read-only probes the detector is built on, so the
-// behaviour can be checked before any notification logic exists:
+//	granag run     the reminder itself
+//	granag list    every capture device and every microphone session
+//	granag watch   a one-line-per-second timeline of level and holders
+//	granag toast   fire one notification, to prove toasts reach the screen
 //
-//	granag list          every capture device and every microphone session
-//	granag watch         a one-line-per-second timeline of level and holders
+// list and watch are the probes the detector was designed against, kept
+// because they are the only way to tell a broken reading from a quiet room.
 package main
 
 import (
@@ -25,6 +27,8 @@ import (
 
 	"github.com/vusty/granag/internal/consent"
 	"github.com/vusty/granag/internal/mic"
+	"github.com/vusty/granag/internal/nag"
+	"github.com/vusty/granag/internal/notify"
 )
 
 const (
@@ -64,13 +68,24 @@ func main() {
 		if err := watch(os.Args[2:]); err != nil {
 			fail(err)
 		}
+	case "run":
+		if err := run(os.Args[2:]); err != nil {
+			fail(err)
+		}
+	case "toast":
+		if err := (notify.Toast{
+			Title: "granag",
+			Body:  "Тестовое уведомление — значит тосты работают.",
+		}).Show(); err != nil {
+			fail(err)
+		}
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: granag <list|watch> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast> [flags]")
 	os.Exit(2)
 }
 
@@ -188,6 +203,102 @@ func watch(args []string) error {
 			return nil
 		}
 	}
+}
+
+// run is the reminder itself: read the consent store on a timer, feed the
+// state machine, show a toast when it asks for one.
+//
+// Polling rather than waiting on RegNotifyChangeKeyValue is deliberate. The
+// read is a dozen registry subkeys, microseconds of work, and the state machine
+// needs its own timers for the debounce and the repeats regardless — so an
+// event-driven registry watch would remove no timer and add a syscall loop.
+func run(args []string) error {
+	cfg := nag.DefaultConfig()
+
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	poll := fs.Duration("poll", 2*time.Second, "how often to read the consent store")
+	dry := fs.Bool("dry-run", false, "log reminders instead of showing them")
+	ignore := fs.String("ignore", strings.Join(cfg.Ignore, ","),
+		"comma-separated executables that do not count as a conversation")
+	fs.DurationVar(&cfg.Debounce, "debounce", cfg.Debounce,
+		"how long a conversation must hold before the first reminder")
+	fs.StringVar(&cfg.Granola, "granola", cfg.Granola,
+		"executable whose grip on the microphone means the conversation is being recorded")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg.Ignore = splitList(*ignore)
+
+	state := nag.New(cfg)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt)
+
+	logf("watching for conversations; reminder after %s, repeats %v, ignoring %s",
+		cfg.Debounce, nag.DefaultRepeats, strings.Join(cfg.Ignore, ", "))
+
+	ticker := time.NewTicker(*poll)
+	defer ticker.Stop()
+
+	var previous string
+	for {
+		select {
+		case <-stop:
+			logf("stopped")
+			return nil
+		case <-ticker.C:
+		}
+
+		active, err := consent.Active()
+		if err != nil {
+			return err
+		}
+		names := make([]string, 0, len(active))
+		for _, h := range active {
+			names = append(names, h.Exe)
+		}
+		sort.Strings(names)
+
+		// Log only transitions, so a day of running leaves a readable trail.
+		if current := strings.Join(names, ", "); current != previous {
+			if current == "" {
+				logf("microphone free")
+			} else {
+				logf("microphone held by %s", current)
+			}
+			previous = current
+		}
+
+		if !state.Update(time.Now(), names) {
+			continue
+		}
+
+		body := "Идёт разговор, а запись не включена."
+		if len(names) > 0 {
+			body = fmt.Sprintf("Микрофон держит %s, а запись не включена.", strings.Join(names, ", "))
+		}
+		if *dry {
+			logf("would remind: %s", body)
+			continue
+		}
+		logf("reminding (%d of this conversation)", state.Sent())
+		if err := (notify.Toast{Title: "Granola не записывает", Body: body}).Show(); err != nil {
+			logf("toast failed: %v", err)
+		}
+	}
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func logf(format string, args ...any) {
+	fmt.Printf("%s  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 }
 
 func holders() string {
