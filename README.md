@@ -14,6 +14,7 @@ remember by hand.
 ## Use
 
     granag run              the reminder, with the tray icon; -no-tray to stay in the terminal
+    granag run -repeats ""  remind once per conversation instead of three times
     granag autostart on     start at logon, through the Run key
     granag toast            fire one notification, to prove toasts reach the screen
     granag list             capture devices with their level, and every microphone session
@@ -85,13 +86,14 @@ built on:
 
 | state | level |
 |---|---|
-| muted with the tap sensor | 0.0002 |
-| unmuted, silent room | 0.019 - 0.054 |
+| muted with the tap sensor | 0.0002, reliably |
+| unmuted, silent room | 0.0063 - 0.054, depending on gain and room |
 | unmuted, speaking | 0.03 - 1.0 |
 
-The default threshold of 0.002 sits an order of magnitude above the muted floor
-and an order below a quiet room, so neither a quieter room nor a lower gain knob
-moves it into doubt. The tap sensor itself is invisible to Windows - the mute
+The default threshold of 0.002 is deliberately lopsided: a comfortable tenfold
+above the muted floor, and only threefold below the quietest live reading seen.
+A missed reminder costs a transcript, a false one costs a notification. Lower it
+with `-on-threshold` if the gain knob ever goes low enough to matter. The tap sensor itself is invisible to Windows - the mute
 flag on the endpoint never moves - so the level is the only way to see it.
 
 Read the physical device, not the NVIDIA Broadcast virtual one: Broadcast's

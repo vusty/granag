@@ -46,11 +46,13 @@ const (
 	defaultDevice = "QuadCast"
 
 	// micOnThreshold is the level above which the microphone counts as
-	// unmuted, measured on a QuadCast S with a stream held open: muted it
-	// floors at 0.0002, and unmuted it never drops below about 0.019 even in
-	// a silent room. This sits an order of magnitude above the floor and an
-	// order below the quiet room, so neither a quieter room nor a lower gain
-	// knob moves it into doubt.
+	// unmuted, measured on a QuadCast S with a stream held open. Muted it
+	// floors at 0.0002, reliably; unmuted and silent it has read anywhere from
+	// 0.0063 to 0.054, depending on the gain knob and on how quiet the room
+	// is. So the margin is lopsided on purpose - a comfortable tenfold above
+	// the muted floor, and only threefold below the quietest live reading
+	// seen - because a missed reminder costs a transcript while a false one
+	// costs a notification.
 	micOnThreshold = 0.002
 
 	// speechThreshold is only for the watch command's display. Speech runs
@@ -267,6 +269,8 @@ func run(args []string) error {
 	logPath := fs.String("log", "", "append the log to this file instead of stdout")
 	suppress := fs.String("suppress", strings.Join(cfg.Suppress, ","),
 		"comma-separated executables that call the reminder off while they hold the microphone")
+	repeats := fs.String("repeats", durations(cfg.Repeats),
+		"comma-separated gaps after the first reminder; their count caps reminders per conversation, and empty means remind once")
 	fs.StringVar(&o.device, "device", o.device, "match this capture device by name")
 	fs.DurationVar(&o.every, "poll", 2*time.Second, "how often to read the level and the consent store")
 	fs.Float64Var(&o.threshold, "on-threshold", micOnThreshold,
@@ -282,6 +286,10 @@ func run(args []string) error {
 		return err
 	}
 	cfg.Suppress = splitList(*suppress)
+	var err error
+	if cfg.Repeats, err = parseDurations(*repeats); err != nil {
+		return fmt.Errorf("-repeats: %w", err)
+	}
 
 	// Autostarted there is no console to write to, so a log file is the only
 	// way to find out afterwards what the tool thought was happening.
@@ -550,6 +558,30 @@ func autostartCmd(args []string) error {
 		return fmt.Errorf("autostart: want on, off or status, got %q", action)
 	}
 	return nil
+}
+
+// durations renders a gap list the way -repeats accepts it back.
+func durations(ds []time.Duration) string {
+	out := make([]string, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, d.String())
+	}
+	return strings.Join(out, ",")
+}
+
+func parseDurations(s string) ([]time.Duration, error) {
+	var out []time.Duration
+	for _, part := range splitList(s) {
+		d, err := time.ParseDuration(part)
+		if err != nil {
+			return nil, err
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("%s is not a gap", part)
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 func splitList(s string) []string {
