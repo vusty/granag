@@ -45,10 +45,17 @@ const (
 	// exact zero, which makes "muted" and "quiet" indistinguishable.
 	defaultDevice = "QuadCast"
 
-	// speechThreshold separates speech from a muted or idle microphone. A
-	// muted QuadCast S floors at about 0.0002 and speech runs 0.03 to 0.14,
-	// so anything in between works; this sits two orders of magnitude above
-	// the floor and well below the quietest speech.
+	// micOnThreshold is the level above which the microphone counts as
+	// unmuted, measured on a QuadCast S with a stream held open: muted it
+	// floors at 0.0002, and unmuted it never drops below about 0.019 even in
+	// a silent room. This sits an order of magnitude above the floor and an
+	// order below the quiet room, so neither a quieter room nor a lower gain
+	// knob moves it into doubt.
+	micOnThreshold = 0.002
+
+	// speechThreshold is only for the watch command's display. Speech runs
+	// 0.03 upwards, but so does an unmuted microphone in a quiet room, so
+	// this tells presence apart rather than speech.
 	speechThreshold = 0.01
 
 	samplePeriod = 100 * time.Millisecond
@@ -62,8 +69,8 @@ func main() {
 	// COM lives on one thread for the process lifetime of these commands.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
-		fail(fmt.Errorf("CoInitializeEx: %w", err))
+	if err := initCOM(); err != nil {
+		fail(err)
 	}
 	defer ole.CoUninitialize()
 
@@ -99,6 +106,26 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast|autostart> [flags]")
 	os.Exit(2)
+}
+
+// initCOM initialises COM on the current thread.
+//
+// S_FALSE means the thread already had COM in the same mode, which is success
+// and still takes a reference, so the caller uninitialises either way. go-ole
+// reports every non-zero HRESULT as an error though, S_FALSE included, so the
+// difference has to be sorted out here - and it comes up for real: the tray
+// owns the main thread while the poller runs on its own, and -no-tray puts both
+// on the same one.
+func initCOM() error {
+	err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED)
+	var oleErr *ole.OleError
+	if errors.As(err, &oleErr) && oleErr.Code() == 1 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("CoInitializeEx: %w", err)
+	}
+	return nil
 }
 
 func fail(err error) {
@@ -217,31 +244,44 @@ func watch(args []string) error {
 	}
 }
 
-// run is the reminder itself: read the consent store on a timer, feed the
-// state machine, show a toast when it asks for one.
-//
-// Polling rather than waiting on RegNotifyChangeKeyValue is deliberate. The
-// read is a dozen registry subkeys, microseconds of work, and the state machine
-// needs its own timers for the debounce and the repeats regardless - so an
-// event-driven registry watch would remove no timer and add a syscall loop.
+// runOpts is what the poll loop needs beyond the state machine.
+type runOpts struct {
+	device      string
+	every       time.Duration
+	threshold   float64
+	buffer      time.Duration
+	dry         bool
+	keepVolume  bool
+	volumeEvery time.Duration
+	status      func(string)
+}
+
+// run is the reminder itself: hold the microphone open so its level can be
+// read, and remind whenever it is live and Granola is not recording.
 func run(args []string) error {
 	cfg := nag.DefaultConfig()
+	o := runOpts{device: defaultDevice, buffer: mic.DefaultBuffer, volumeEvery: 30 * time.Second}
 
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	every := fs.Duration("poll", 2*time.Second, "how often to read the consent store")
-	dry := fs.Bool("dry-run", false, "log reminders instead of showing them")
 	noTray := fs.Bool("no-tray", false, "stay in the terminal, without the tray icon")
 	logPath := fs.String("log", "", "append the log to this file instead of stdout")
-	ignore := fs.String("ignore", strings.Join(cfg.Ignore, ","),
-		"comma-separated executables that do not count as a conversation")
+	suppress := fs.String("suppress", strings.Join(cfg.Suppress, ","),
+		"comma-separated executables that call the reminder off while they hold the microphone")
+	fs.StringVar(&o.device, "device", o.device, "match this capture device by name")
+	fs.DurationVar(&o.every, "poll", 2*time.Second, "how often to read the level and the consent store")
+	fs.Float64Var(&o.threshold, "on-threshold", micOnThreshold,
+		"level above which the microphone counts as unmuted")
+	fs.BoolVar(&o.dry, "dry-run", false, "log reminders instead of showing them")
+	fs.BoolVar(&o.keepVolume, "keep-volume", true,
+		"hold every capture device's input volume at maximum")
 	fs.DurationVar(&cfg.Debounce, "debounce", cfg.Debounce,
-		"how long a conversation must hold before the first reminder")
+		"how long the microphone must stay live before the first reminder")
 	fs.StringVar(&cfg.Granola, "granola", cfg.Granola,
 		"executable whose grip on the microphone means the conversation is being recorded")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg.Ignore = splitList(*ignore)
+	cfg.Suppress = splitList(*suppress)
 
 	// Autostarted there is no console to write to, so a log file is the only
 	// way to find out afterwards what the tool thought was happening.
@@ -258,8 +298,8 @@ func run(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logf("watching for conversations; reminder after %s, repeats %v, ignoring %s",
-		cfg.Debounce, cfg.Repeats, strings.Join(cfg.Ignore, ", "))
+	logf("reminder after %s live microphone, repeats %v, suppressed by %s",
+		cfg.Debounce, cfg.Repeats, strings.Join(cfg.Suppress, ", "))
 
 	if *noTray {
 		stop := make(chan os.Signal, 1)
@@ -268,11 +308,12 @@ func run(args []string) error {
 			<-stop
 			cancel()
 		}()
-		return poll(ctx, state, *every, *dry, nil)
+		return poll(ctx, state, o)
 	}
 
+	o.status = tray.SetStatus
 	errc := make(chan error, 1)
-	go func() { errc <- poll(ctx, state, *every, *dry, tray.SetStatus) }()
+	go func() { errc <- poll(ctx, state, o) }()
 
 	tray.Run(tray.Options{
 		OnPause: func(paused bool) {
@@ -296,20 +337,68 @@ func run(args []string) error {
 	}
 }
 
-// poll drives the state machine until ctx is done. status, when set, receives
-// short lines for the tray tooltip.
-func poll(ctx context.Context, state *nag.State, every time.Duration, dry bool, status func(string)) error {
-	ticker := time.NewTicker(every)
+// poll holds a capture stream open and drives the state machine until ctx is
+// done.
+//
+// The stream is the whole reason the level is readable: with nothing capturing,
+// the meter reads the same flat value whether the microphone is muted or being
+// talked into. Holding it lights the Windows microphone indicator for as long
+// as the tool runs, which is the price of noticing a conversation that nobody
+// is dialling into.
+func poll(ctx context.Context, state *nag.State, o runOpts) error {
+	// COM is per-thread, and this runs on its own goroutine while the tray
+	// owns the main one.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := initCOM(); err != nil {
+		return err
+	}
+	defer ole.CoUninitialize()
+
+	dev, err := mic.Find(o.device)
+	if err != nil {
+		return err
+	}
+	defer dev.Release()
+
+	stream, err := dev.Hold(o.buffer)
+	if err != nil {
+		return fmt.Errorf("holding %s open: %w", dev.Name, err)
+	}
+	defer stream.Close()
+	logf("holding %s open; unmuted above %.4f", dev.Name, o.threshold)
+
+	ticker := time.NewTicker(o.every)
 	defer ticker.Stop()
 
-	var previous string
+	volumeTick := time.NewTicker(o.volumeEvery)
+	defer volumeTick.Stop()
+	if o.keepVolume {
+		keepVolume()
+	}
+
+	var wasLive bool
 	for {
 		select {
 		case <-ctx.Done():
 			logf("stopped")
 			return nil
+		case <-volumeTick.C:
+			if o.keepVolume {
+				keepVolume()
+			}
+			continue
 		case <-ticker.C:
 		}
+
+		if err := stream.Drain(); err != nil {
+			return err
+		}
+		peak, err := dev.Peak()
+		if err != nil {
+			return err
+		}
+		micOn := float64(peak) > o.threshold
 
 		active, err := consent.Active()
 		if err != nil {
@@ -321,34 +410,32 @@ func poll(ctx context.Context, state *nag.State, every time.Duration, dry bool, 
 		}
 		sort.Strings(names)
 
-		// Log only transitions, so a day of running leaves a readable trail.
-		if current := strings.Join(names, ", "); current != previous {
-			if current == "" {
-				logf("microphone free")
-			} else {
-				logf("microphone held by %s", current)
-			}
-			previous = current
-		}
+		remind := state.Update(time.Now(), micOn, names)
 
-		remind := state.Update(time.Now(), names)
-		if status != nil && !state.Paused() {
+		if live := state.Live(); live != wasLive {
+			if live {
+				logf("microphone live (peak %.4f), held by %s", peak, orNone(names))
+			} else {
+				logf("microphone quiet")
+			}
+			wasLive = live
+		}
+		if o.status != nil {
 			switch {
-			case state.Talking():
-				status("разговор идёт, запись не включена")
+			case state.Paused():
+				o.status("пауза")
+			case state.Live():
+				o.status("микрофон включён, запись не идёт")
 			default:
-				status("слежу за разговорами")
+				o.status("слежу за микрофоном")
 			}
 		}
 		if !remind {
 			continue
 		}
 
-		body := "Идёт разговор, а запись не включена."
-		if len(names) > 0 {
-			body = fmt.Sprintf("Микрофон держит %s, а запись не включена.", strings.Join(names, ", "))
-		}
-		if dry {
+		body := "Микрофон включён, а Granola не пишет."
+		if o.dry {
 			logf("would remind: %s", body)
 			continue
 		}
@@ -357,6 +444,38 @@ func poll(ctx context.Context, state *nag.State, every time.Duration, dry bool, 
 			logf("toast failed: %v", err)
 		}
 	}
+}
+
+// keepVolume puts every active capture device back to full input volume.
+//
+// Windows drops the input volume to zero across some restarts, and a
+// zero-volume microphone is silent to the other side while everything still
+// looks connected - the failure you learn about a minute into a call. The gain
+// that matters lives on the microphone itself, so there is nothing this slider
+// should ever be doing except sitting at maximum.
+func keepVolume() {
+	devs, err := mic.Devices()
+	if err != nil {
+		logf("volume check failed: %v", err)
+		return
+	}
+	for _, d := range devs {
+		raised, err := d.RaiseToMax()
+		switch {
+		case err != nil:
+			logf("%s: could not raise the input volume: %v", d.Name, err)
+		case raised:
+			logf("%s: input volume was below maximum, raised it", d.Name)
+		}
+		d.Release()
+	}
+}
+
+func orNone(names []string) string {
+	if len(names) == 0 {
+		return "nobody"
+	}
+	return strings.Join(names, ", ")
 }
 
 // granolaExe finds Granola through the consent store, which records the full

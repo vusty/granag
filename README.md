@@ -49,32 +49,76 @@ answers "is Granola recording, or merely running" without any Granola API. It
 also tells a meeting from a game: if Discord holds the microphone, nobody wants
 a transcript.
 
-## What the trigger turned out to be
+## How it decides
 
-The level is not part of it. `IAudioMeterInformation` only reports while the
-device's audio engine is running, which means while some application is already
-capturing — with nothing capturing it reads a flat zero even as you talk into an
-unmuted microphone, measured on 2026-09-03. And the small floor it returns
-otherwise, around 0.0002, is what digital silence reads: it looks the same
-whether the engine is asleep or the microphone is muted in hardware, so it
-cannot tell those apart either.
+The trigger is the microphone being live:
 
-So by the time the level could confirm a conversation, the consent store has
-already said so. The trigger is the consent store alone: an application other
-than Granola holds the microphone. That fires when the call starts rather than
-after the first sentences, costs a dozen registry reads every couple of seconds,
-and never lights the microphone indicator.
+    the level says the microphone is unmuted
+      and Granola is not holding it
+      and Discord is not holding it
+      and reminders are not paused
+      and that has held for 10 seconds
+    -> remind
 
-NVIDIA Broadcast has to be ignored for this to work. It opens the physical
-microphone on demand, when something takes its virtual one, so it shows up
-*alongside* the real client — counted naively, every call would look like two,
-and Broadcast sitting idle would look like a call.
+The microphone is muted in hardware except when a conversation is about to
+happen, so an unmuted microphone is already the decision to talk - which is why
+the debounce is ten seconds rather than a wait for someone to speak, and why no
+call application need be involved at all. A meeting in the room counts the same
+as a call.
 
-The level survives for two things: telling a broken audio path from a quiet room
-(a long, perfect zero while a call is under way means the pipeline is dead, not
-that nobody is talking), and a possible in-room mode, where the tool would hold
-its own capture stream and so be the capturer the meter needs. That mode would
-light the microphone indicator permanently, which is why it is not the default.
+Discord calls it off because gaming is talking with the microphone live and
+wanting no transcript. The tray pause covers everything else.
+
+## What that costs, and why the level needs a stream
+
+`IAudioMeterInformation` reports nothing while no application captures: with
+nothing capturing it reads a flat floor even as you talk into an unmuted
+microphone. So the tool holds a shared-mode capture stream of its own, which
+makes it the application the meter needs. Shared mode takes nothing from
+anyone - calls, Granola and this stream coexist - but Windows lights the
+microphone indicator for as long as the tool runs and lists it among the
+applications listening. Since the microphone is muted in hardware anyway, the
+indicator ends up telling the truth: lit while the device is live.
+
+Measured on a QuadCast S with the stream held, which is what the threshold is
+built on:
+
+| state | level |
+|---|---|
+| muted with the tap sensor | 0.0002 |
+| unmuted, silent room | 0.019 - 0.054 |
+| unmuted, speaking | 0.03 - 1.0 |
+
+The default threshold of 0.002 sits an order of magnitude above the muted floor
+and an order below a quiet room, so neither a quieter room nor a lower gain knob
+moves it into doubt. The tap sensor itself is invisible to Windows - the mute
+flag on the endpoint never moves - so the level is the only way to see it.
+
+Read the physical device, not the NVIDIA Broadcast virtual one: Broadcast's
+noise removal drives a silent room down to 0.0008, where muted and unmuted stop
+being distinguishable.
+
+## The input volume
+
+Windows drops the capture endpoints' input volume to zero across some restarts.
+A zero-volume microphone is silent to the other side while everything still
+looks connected - the failure you learn about a minute into a call. The gain
+that matters is the knob on the microphone, so this slider has no business
+anywhere but maximum, and `run` puts every capture device back there on start
+and every thirty seconds after. `-keep-volume=false` turns that off.
+
+It gets there by stepping the volume up rather than by setting a value: the
+setters take a float by value, and on amd64 a float argument travels in an XMM
+register, which Go's syscall bridge cannot fill.
+
+## What the consent store is still for
+
+`CapabilityAccessManager` records one session per application, with
+`LastUsedTimeStop` zero while capture is open. It answers two questions the
+level cannot: whether Granola is recording rather than merely running - checked
+against a real 31-minute call and against Granola sitting open and idle, which
+holds no microphone at all - and whether Discord has the microphone, which calls
+the reminder off.
 
 ## Not done yet
 
@@ -82,6 +126,3 @@ A Start Menu shortcut carrying an AppUserModelID of our own. That is what would
 put the tool's name on the notification instead of "Windows PowerShell", and it
 is the same prerequisite for buttons inside the toast. The tray menu already
 does what those buttons would, so this is cosmetics until proven otherwise.
-
-The in-room mode described above, if a meeting with nobody dialling in ever
-turns out to matter.

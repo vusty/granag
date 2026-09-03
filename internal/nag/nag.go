@@ -1,7 +1,8 @@
 // Package nag decides when to remind about Granola.
 //
-// The decision is a pure function of time and of which applications hold the
-// microphone, so it carries no Windows dependency and is tested directly.
+// The decision is a pure function of time, of whether the microphone is live,
+// and of which applications hold it, so it carries no Windows dependency and is
+// tested directly.
 package nag
 
 import (
@@ -11,11 +12,16 @@ import (
 	"time"
 )
 
-// Defaults for Config. A conversation has to hold for Debounce before the
-// first reminder, so a voice message or a microphone test says nothing.
 const (
-	DefaultGranola  = "Granola.exe"
-	DefaultDebounce = 30 * time.Second
+	// DefaultGranola is the executable whose grip on the microphone means the
+	// conversation is already being recorded.
+	DefaultGranola = "Granola.exe"
+
+	// DefaultDebounce is how long the microphone must stay live before the
+	// first reminder. It is short on purpose: the microphone is muted in
+	// hardware except when a conversation is about to happen, so an unmuted
+	// one is already a deliberate act rather than something to wait out.
+	DefaultDebounce = 10 * time.Second
 )
 
 // DefaultRepeats are the gaps after the first reminder. The list also caps how
@@ -23,16 +29,11 @@ const (
 // that keeps arriving is a reminder that gets dismissed without reading.
 var DefaultRepeats = []time.Duration{3 * time.Minute, 10 * time.Minute}
 
-// DefaultIgnore lists applications whose grip on the microphone does not mean
-// a conversation worth transcribing.
-var DefaultIgnore = []string{
-	// Opens the physical microphone on demand, when something takes its
-	// virtual one, so it always appears alongside the real client rather than
-	// instead of it. Counting it would make every call look like two.
-	"NVIDIA Broadcast.exe",
-	// The sound settings page, which captures to draw its level bar.
-	"windows.immersivecontrolpanel_cw5n1h2txyewy",
-	// Gaming with friends is not a meeting.
+// DefaultSuppress lists applications whose grip on the microphone means the
+// reminder is unwanted even though the microphone is live.
+var DefaultSuppress = []string{
+	// Gaming with friends is talking with the microphone live, and no
+	// transcript is wanted.
 	"Discord.exe",
 }
 
@@ -41,9 +42,11 @@ type Config struct {
 	// Granola is the executable whose grip means the conversation is already
 	// being recorded.
 	Granola string
-	// Ignore lists executables that do not count as a conversation.
-	Ignore []string
-	// Debounce is how long a conversation must hold before the first reminder.
+	// Suppress lists executables that call the reminder off while they hold
+	// the microphone.
+	Suppress []string
+	// Debounce is how long the microphone must stay live before the first
+	// reminder.
 	Debounce time.Duration
 	// Repeats are the gaps after the first reminder, and their count caps the
 	// reminders per conversation.
@@ -54,13 +57,13 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Granola:  DefaultGranola,
-		Ignore:   slices.Clone(DefaultIgnore),
+		Suppress: slices.Clone(DefaultSuppress),
 		Debounce: DefaultDebounce,
 		Repeats:  slices.Clone(DefaultRepeats),
 	}
 }
 
-// State tracks one conversation at a time.
+// State tracks one live stretch of microphone at a time.
 //
 // The tray toggles the pause from its own goroutine while the poller calls
 // Update from another, so every method takes the lock.
@@ -68,14 +71,14 @@ type State struct {
 	mu  sync.Mutex
 	cfg Config
 
-	// talking is set while a conversation is under way; since is when it
-	// started, and sent counts the reminders it has already had.
-	talking bool
-	since   time.Time
-	sent    int
-	last    time.Time
+	// live is set while the microphone is unmuted and unrecorded; since is
+	// when that started, and sent counts the reminders it has already had.
+	live  bool
+	since time.Time
+	sent  int
+	last  time.Time
 
-	// paused suppresses reminders without losing the conversation, for the
+	// paused suppresses reminders without losing the current stretch, for the
 	// tray toggle.
 	paused bool
 }
@@ -91,8 +94,8 @@ func New(cfg Config) *State {
 	return &State{cfg: cfg}
 }
 
-// SetPaused turns reminders off and on. Pausing keeps the current
-// conversation, so unpausing mid-call does not start its debounce over.
+// SetPaused turns reminders off and on. Pausing keeps the current stretch, so
+// unpausing mid-conversation does not start its debounce over.
 func (s *State) SetPaused(p bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,35 +109,31 @@ func (s *State) Paused() bool {
 	return s.paused
 }
 
-// Update feeds the current microphone holders in and reports whether to remind
-// now. holders are executable names as the consent store spells them.
+// Update reports whether to remind now.
 //
-// Reminders stop as soon as Granola takes the microphone, and the counter
-// resets when the conversation ends, so the next one starts from a clean slate.
-func (s *State) Update(now time.Time, holders []string) bool {
+// micOn is whether the microphone is unmuted, read from its level; holders are
+// the executables capturing it, as the consent store spells them. Reminders
+// stop as soon as Granola takes the microphone, and the counter resets when the
+// microphone goes quiet, so the next conversation starts from a clean slate.
+func (s *State) Update(now time.Time, micOn bool, holders []string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	recording := s.matches(holders, s.cfg.Granola)
-	conversation := false
-	for _, h := range holders {
-		if s.ignored(h) || strings.EqualFold(h, s.cfg.Granola) {
-			continue
-		}
-		conversation = true
-		break
-	}
+	recording := contains(holders, s.cfg.Granola)
+	suppressed := slices.ContainsFunc(s.cfg.Suppress, func(exe string) bool {
+		return contains(holders, exe)
+	})
 
-	// Granola is recording, or there is nobody to record: nothing to remind
-	// about, and the next conversation gets its reminders back.
-	if !conversation || recording {
-		s.talking = false
+	// Muted, already being recorded, or deliberately not our business: nothing
+	// to remind about, and the next conversation gets its reminders back.
+	if !micOn || recording || suppressed {
+		s.live = false
 		s.sent = 0
 		return false
 	}
 
-	if !s.talking {
-		s.talking = true
+	if !s.live {
+		s.live = true
 		s.since = now
 		s.sent = 0
 	}
@@ -166,11 +165,11 @@ func (s *State) Update(now time.Time, holders []string) bool {
 	return true
 }
 
-// Talking reports whether a conversation is currently under way.
-func (s *State) Talking() bool {
+// Live reports whether the microphone is currently live and unrecorded.
+func (s *State) Live() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.talking
+	return s.live
 }
 
 // Sent reports how many reminders the current conversation has had.
@@ -180,13 +179,7 @@ func (s *State) Sent() int {
 	return s.sent
 }
 
-func (s *State) ignored(exe string) bool {
-	return slices.ContainsFunc(s.cfg.Ignore, func(i string) bool {
-		return strings.EqualFold(i, exe)
-	})
-}
-
-func (s *State) matches(holders []string, exe string) bool {
+func contains(holders []string, exe string) bool {
 	return slices.ContainsFunc(holders, func(h string) bool {
 		return strings.EqualFold(h, exe)
 	})
