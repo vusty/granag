@@ -14,14 +14,21 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 
 	ole "github.com/go-ole/go-ole"
 
@@ -29,6 +36,7 @@ import (
 	"github.com/vusty/granag/internal/mic"
 	"github.com/vusty/granag/internal/nag"
 	"github.com/vusty/granag/internal/notify"
+	"github.com/vusty/granag/internal/tray"
 )
 
 const (
@@ -72,6 +80,10 @@ func main() {
 		if err := run(os.Args[2:]); err != nil {
 			fail(err)
 		}
+	case "autostart":
+		if err := autostartCmd(os.Args[2:]); err != nil {
+			fail(err)
+		}
 	case "toast":
 		if err := (notify.Toast{
 			Title: "granag",
@@ -85,7 +97,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast|autostart> [flags]")
 	os.Exit(2)
 }
 
@@ -210,14 +222,16 @@ func watch(args []string) error {
 //
 // Polling rather than waiting on RegNotifyChangeKeyValue is deliberate. The
 // read is a dozen registry subkeys, microseconds of work, and the state machine
-// needs its own timers for the debounce and the repeats regardless — so an
+// needs its own timers for the debounce and the repeats regardless - so an
 // event-driven registry watch would remove no timer and add a syscall loop.
 func run(args []string) error {
 	cfg := nag.DefaultConfig()
 
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	poll := fs.Duration("poll", 2*time.Second, "how often to read the consent store")
+	every := fs.Duration("poll", 2*time.Second, "how often to read the consent store")
 	dry := fs.Bool("dry-run", false, "log reminders instead of showing them")
+	noTray := fs.Bool("no-tray", false, "stay in the terminal, without the tray icon")
+	logPath := fs.String("log", "", "append the log to this file instead of stdout")
 	ignore := fs.String("ignore", strings.Join(cfg.Ignore, ","),
 		"comma-separated executables that do not count as a conversation")
 	fs.DurationVar(&cfg.Debounce, "debounce", cfg.Debounce,
@@ -229,20 +243,69 @@ func run(args []string) error {
 	}
 	cfg.Ignore = splitList(*ignore)
 
+	// Autostarted there is no console to write to, so a log file is the only
+	// way to find out afterwards what the tool thought was happening.
+	if *logPath != "" {
+		f, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		logOut = f
+	}
+
 	state := nag.New(cfg)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	logf("watching for conversations; reminder after %s, repeats %v, ignoring %s",
-		cfg.Debounce, nag.DefaultRepeats, strings.Join(cfg.Ignore, ", "))
+		cfg.Debounce, cfg.Repeats, strings.Join(cfg.Ignore, ", "))
 
-	ticker := time.NewTicker(*poll)
+	if *noTray {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt)
+		go func() {
+			<-stop
+			cancel()
+		}()
+		return poll(ctx, state, *every, *dry, nil)
+	}
+
+	errc := make(chan error, 1)
+	go func() { errc <- poll(ctx, state, *every, *dry, tray.SetStatus) }()
+
+	tray.Run(tray.Options{
+		OnPause: func(paused bool) {
+			state.SetPaused(paused)
+			if paused {
+				logf("reminders paused")
+			} else {
+				logf("reminders resumed")
+			}
+		},
+		OnOpenGranola: openGranola,
+		OnQuit:        cancel,
+	})
+
+	cancel()
+	select {
+	case err := <-errc:
+		return err
+	default:
+		return nil
+	}
+}
+
+// poll drives the state machine until ctx is done. status, when set, receives
+// short lines for the tray tooltip.
+func poll(ctx context.Context, state *nag.State, every time.Duration, dry bool, status func(string)) error {
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 
 	var previous string
 	for {
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			logf("stopped")
 			return nil
 		case <-ticker.C:
@@ -268,7 +331,16 @@ func run(args []string) error {
 			previous = current
 		}
 
-		if !state.Update(time.Now(), names) {
+		remind := state.Update(time.Now(), names)
+		if status != nil && !state.Paused() {
+			switch {
+			case state.Talking():
+				status("разговор идёт, запись не включена")
+			default:
+				status("слежу за разговорами")
+			}
+		}
+		if !remind {
 			continue
 		}
 
@@ -276,7 +348,7 @@ func run(args []string) error {
 		if len(names) > 0 {
 			body = fmt.Sprintf("Микрофон держит %s, а запись не включена.", strings.Join(names, ", "))
 		}
-		if *dry {
+		if dry {
 			logf("would remind: %s", body)
 			continue
 		}
@@ -285,6 +357,80 @@ func run(args []string) error {
 			logf("toast failed: %v", err)
 		}
 	}
+}
+
+// granolaExe finds Granola through the consent store, which records the full
+// path of everything that has ever asked for the microphone. Granola has, so
+// there is no need to guess at install locations.
+func granolaExe() (string, error) {
+	holders, err := consent.Holders()
+	if err != nil {
+		return "", err
+	}
+	for _, h := range holders {
+		if strings.EqualFold(h.Exe, nag.DefaultGranola) {
+			return h.Path, nil
+		}
+	}
+	return "", fmt.Errorf("no %s in the microphone consent store", nag.DefaultGranola)
+}
+
+func openGranola() error {
+	path, err := granolaExe()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd.Start()
+}
+
+const autostartKey = `Software\Microsoft\Windows\CurrentVersion\Run`
+
+// autostartCmd turns logon startup on and off through the Run key. A registry
+// value needs no COM, unlike a Start Menu shortcut, and Windows honours it the
+// same way.
+func autostartCmd(args []string) error {
+	action := "status"
+	if len(args) > 0 {
+		action = args[0]
+	}
+
+	k, err := registry.OpenKey(registry.CURRENT_USER, autostartKey, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+
+	switch action {
+	case "on":
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if err := k.SetStringValue("granag", `"`+self+`" run`); err != nil {
+			return err
+		}
+		fmt.Println("autostart on:", self)
+	case "off":
+		if err := k.DeleteValue("granag"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return err
+		}
+		fmt.Println("autostart off")
+	case "status":
+		v, _, err := k.GetStringValue("granag")
+		if errors.Is(err, registry.ErrNotExist) {
+			fmt.Println("autostart off")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Println("autostart on:", v)
+	default:
+		return fmt.Errorf("autostart: want on, off or status, got %q", action)
+	}
+	return nil
 }
 
 func splitList(s string) []string {
@@ -297,8 +443,11 @@ func splitList(s string) []string {
 	return out
 }
 
+// logOut is where logf writes; -log points it at a file.
+var logOut io.Writer = os.Stdout
+
 func logf(format string, args ...any) {
-	fmt.Printf("%s  %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	fmt.Fprintf(logOut, "%s  %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 }
 
 func holders() string {

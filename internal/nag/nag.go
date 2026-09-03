@@ -7,6 +7,7 @@ package nag
 import (
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,7 +61,11 @@ func DefaultConfig() Config {
 }
 
 // State tracks one conversation at a time.
+//
+// The tray toggles the pause from its own goroutine while the poller calls
+// Update from another, so every method takes the lock.
 type State struct {
+	mu  sync.Mutex
 	cfg Config
 
 	// talking is set while a conversation is under way; since is when it
@@ -88,10 +93,18 @@ func New(cfg Config) *State {
 
 // SetPaused turns reminders off and on. Pausing keeps the current
 // conversation, so unpausing mid-call does not start its debounce over.
-func (s *State) SetPaused(p bool) { s.paused = p }
+func (s *State) SetPaused(p bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = p
+}
 
 // Paused reports whether reminders are suppressed.
-func (s *State) Paused() bool { return s.paused }
+func (s *State) Paused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused
+}
 
 // Update feeds the current microphone holders in and reports whether to remind
 // now. holders are executable names as the consent store spells them.
@@ -99,6 +112,9 @@ func (s *State) Paused() bool { return s.paused }
 // Reminders stop as soon as Granola takes the microphone, and the counter
 // resets when the conversation ends, so the next one starts from a clean slate.
 func (s *State) Update(now time.Time, holders []string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	recording := s.matches(holders, s.cfg.Granola)
 	conversation := false
 	for _, h := range holders {
@@ -151,10 +167,18 @@ func (s *State) Update(now time.Time, holders []string) bool {
 }
 
 // Talking reports whether a conversation is currently under way.
-func (s *State) Talking() bool { return s.talking }
+func (s *State) Talking() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.talking
+}
 
 // Sent reports how many reminders the current conversation has had.
-func (s *State) Sent() int { return s.sent }
+func (s *State) Sent() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sent
+}
 
 func (s *State) ignored(exe string) bool {
 	return slices.ContainsFunc(s.cfg.Ignore, func(i string) bool {

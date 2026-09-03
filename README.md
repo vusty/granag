@@ -11,13 +11,20 @@ so an unmuted microphone means I am about to talk. What I keep forgetting is
 the record button, and a meeting with no transcript is a meeting I have to
 remember by hand.
 
-## State
+## Use
 
-The two probes the detector is built on are written and verified on the real
-machine. The notification, the tray icon and the state machine are not.
+    granag run              the reminder, with the tray icon; -no-tray to stay in the terminal
+    granag autostart on     start at logon, through the Run key
+    granag toast            fire one notification, to prove toasts reach the screen
+    granag list             capture devices with their level, and every microphone session
+    granag watch            one line a second: level, whether it counts as speech, who holds the mic
 
-    granag list      capture devices with their level, and every microphone session
-    granag watch     one line a second: level, whether it counts as speech, who holds the mic
+Idle it sits at about 14 MB and no measurable CPU: the work is a dozen registry
+reads every two seconds.
+
+The tray icon is green while reminders are on and grey while paused, and its
+menu opens Granola, pauses, pauses for an hour, or quits. The hourly pause
+exists because a plain toggle gets left off.
 
 Build from WSL, run on Windows:
 
@@ -71,5 +78,10 @@ light the microphone indicator permanently, which is why it is not the default.
 
 ## Not done yet
 
-The tray icon and its pause toggle, the Start Menu shortcut that would give the
-toast its own name and make buttons inside it possible, and autostart.
+A Start Menu shortcut carrying an AppUserModelID of our own. That is what would
+put the tool's name on the notification instead of "Windows PowerShell", and it
+is the same prerequisite for buttons inside the toast. The tray menu already
+does what those buttons would, so this is cosmetics until proven otherwise.
+
+The in-room mode described above, if a meeting with nobody dialling in ever
+turns out to matter.
