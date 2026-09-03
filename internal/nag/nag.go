@@ -25,9 +25,12 @@ const (
 )
 
 // DefaultRepeats are the gaps after the first reminder. The list also caps how
-// many reminders one conversation can get: three, and then silence. A reminder
-// that keeps arriving is a reminder that gets dismissed without reading.
-var DefaultRepeats = []time.Duration{3 * time.Minute, 10 * time.Minute}
+// many reminders one conversation can get: two, and then silence.
+//
+// Two rather than more because unmuting the microphone is deliberate here - if
+// the first reminder went unanswered, the odds are it was meant to, and the
+// second is only there for having been distracted mid-thought.
+var DefaultRepeats = []time.Duration{3 * time.Minute}
 
 // DefaultSuppress lists applications whose grip on the microphone means the
 // reminder is unwanted even though the microphone is live.

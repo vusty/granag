@@ -14,7 +14,7 @@ remember by hand.
 ## Use
 
     granag run              the reminder, with the tray icon; -no-tray to stay in the terminal
-    granag run -repeats ""  remind once per conversation instead of three times
+    granag run -repeats ""  remind once per conversation instead of twice
     granag autostart on     start at logon, through the Run key
     granag toast            fire one notification, to prove toasts reach the screen
     granag list             capture devices with their level, and every microphone session
@@ -59,7 +59,7 @@ The trigger is the microphone being live:
       and Discord is not holding it
       and reminders are not paused
       and that has held for 10 seconds
-    -> remind
+    -> remind, and once more three minutes later, then stop
 
 The microphone is muted in hardware except when a conversation is about to
 happen, so an unmuted microphone is already the decision to talk - which is why

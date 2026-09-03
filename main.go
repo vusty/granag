@@ -535,10 +535,21 @@ func autostartCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := k.SetStringValue("granag", `"`+self+`" run`); err != nil {
+		// Anything after "on" is passed to run at logon, which is how the log
+		// file gets set: an autostarted process has no console, so without one
+		// there is no way to see afterwards what it thought was happening.
+		value := `"` + self + `" run`
+		for _, arg := range args[1:] {
+			if strings.ContainsAny(arg, ` "`) {
+				value += ` "` + arg + `"`
+				continue
+			}
+			value += " " + arg
+		}
+		if err := k.SetStringValue("granag", value); err != nil {
 			return err
 		}
-		fmt.Println("autostart on:", self)
+		fmt.Println("autostart on:", value)
 	case "off":
 		if err := k.DeleteValue("granag"); err != nil && !errors.Is(err, registry.ErrNotExist) {
 			return err

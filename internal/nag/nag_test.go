@@ -62,9 +62,45 @@ func TestNobodyCapturingStillReminds(t *testing.T) {
 }
 
 func TestRepeatsAreCappedAndSpaced(t *testing.T) {
-	c := newClock(DefaultConfig())
+	cfg := DefaultConfig()
+	cfg.Repeats = []time.Duration{time.Minute, 5 * time.Minute}
+	c := newClock(cfg)
 
 	c.after(0, on) // the poll that first sees the microphone live
+	if !c.after(DefaultDebounce, on) {
+		t.Fatal("no first reminder")
+	}
+	if c.after(cfg.Repeats[0]-time.Second, on) {
+		t.Fatal("second reminder came early")
+	}
+	if !c.after(time.Second, on) {
+		t.Fatal("no second reminder")
+	}
+	if c.after(cfg.Repeats[1]-time.Second, on) {
+		t.Fatal("third reminder came early")
+	}
+	if !c.after(time.Second, on) {
+		t.Fatal("no third reminder")
+	}
+
+	// The gap list is the cap: an hour of the same conversation earns nothing
+	// more.
+	for i := 0; i < 6; i++ {
+		if c.after(10*time.Minute, on) {
+			t.Fatal("reminded past the cap")
+		}
+	}
+	if got := c.state.Sent(); got != 3 {
+		t.Fatalf("sent %d reminders, want 3", got)
+	}
+}
+
+// The cadence the tool ships with: one straight away, one three minutes later,
+// then silence for the rest of the conversation.
+func TestShippedCadenceIsTwoReminders(t *testing.T) {
+	c := newClock(DefaultConfig())
+
+	c.after(0, on)
 	if !c.after(DefaultDebounce, on) {
 		t.Fatal("no first reminder")
 	}
@@ -74,18 +110,13 @@ func TestRepeatsAreCappedAndSpaced(t *testing.T) {
 	if !c.after(time.Second, on) {
 		t.Fatal("no second reminder")
 	}
-	if !c.after(DefaultRepeats[1], on) {
-		t.Fatal("no third reminder")
-	}
-
-	// Three is the cap: an hour of the same conversation earns nothing more.
 	for i := 0; i < 6; i++ {
 		if c.after(10*time.Minute, on) {
-			t.Fatal("reminded past the cap")
+			t.Fatal("a third reminder arrived")
 		}
 	}
-	if got := c.state.Sent(); got != 3 {
-		t.Fatalf("sent %d reminders, want 3", got)
+	if got := c.state.Sent(); got != 2 {
+		t.Fatalf("sent %d reminders, want 2", got)
 	}
 }
 
