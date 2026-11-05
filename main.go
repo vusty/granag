@@ -61,6 +61,10 @@ const (
 	speechThreshold = 0.01
 
 	samplePeriod = 100 * time.Millisecond
+
+	// retryEvery is how long to wait before trying the microphone again after
+	// it could not be found or held.
+	retryEvery = 5 * time.Second
 )
 
 func main() {
@@ -256,6 +260,7 @@ type runOpts struct {
 	keepVolume  bool
 	volumeEvery time.Duration
 	status      func(string)
+	held        func()
 }
 
 // run is the reminder itself: hold the microphone open so its level can be
@@ -316,12 +321,12 @@ func run(args []string) error {
 			<-stop
 			cancel()
 		}()
-		return poll(ctx, state, o)
+		keepPolling(ctx, state, o)
+		return nil
 	}
 
 	o.status = tray.SetStatus
-	errc := make(chan error, 1)
-	go func() { errc <- poll(ctx, state, o) }()
+	go keepPolling(ctx, state, o)
 
 	tray.Run(tray.Options{
 		OnPause: func(paused bool) {
@@ -337,11 +342,41 @@ func run(args []string) error {
 	})
 
 	cancel()
-	select {
-	case err := <-errc:
-		return err
-	default:
-		return nil
+	return nil
+}
+
+// keepPolling reruns poll until ctx is done.
+//
+// The microphone is not always there to hold. Autostarted within twenty
+// seconds of boot, the QuadCast has not enumerated yet, and poll used to end
+// right there with nobody reading its error: the tray stayed up saying it was
+// watching while nothing was. So a failure is logged, shown in the tooltip,
+// and tried again. The same error is logged once per outage, not every retry.
+func keepPolling(ctx context.Context, state *nag.State, o runOpts) {
+	var last string
+	o.held = func() { last = "" }
+	for {
+		err := poll(ctx, state, o)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			// poll returns nil only once ctx is done; anything else is a bug
+			// worth hearing about rather than a silent spin.
+			err = errors.New("poll returned without an error")
+		}
+		if msg := err.Error(); msg != last {
+			logf("microphone unavailable, retrying every %s: %v", retryEvery, err)
+			last = msg
+		}
+		if o.status != nil {
+			o.status("микрофон не найден, жду")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryEvery):
+		}
 	}
 }
 
@@ -375,6 +410,9 @@ func poll(ctx context.Context, state *nag.State, o runOpts) error {
 	}
 	defer stream.Close()
 	logf("holding %s open; unmuted above %.4f", dev.Name, o.threshold)
+	if o.held != nil {
+		o.held()
+	}
 
 	ticker := time.NewTicker(o.every)
 	defer ticker.Stop()
