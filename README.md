@@ -17,11 +17,11 @@ remember by hand.
     granag run -repeats ""  remind once per conversation instead of twice
     granag autostart on     start at logon, through the Run key
     granag toast            fire one notification, to prove toasts reach the screen
-    granag list             capture devices with their level, and every microphone session
+    granag list             capture devices with their level, and who is capturing from them
     granag watch            one line a second: level, whether it counts as speech, who holds the mic
 
-Idle it sits at about 14 MB and no measurable CPU: the work is a dozen registry
-reads every two seconds.
+Idle it sits at about 14 MB and no measurable CPU: the work is one pass over
+the audio sessions every two seconds.
 
 The tray icon is green while reminders are on and grey while paused, and its
 menu opens Granola, pauses, pauses for an hour, or quits. The hourly pause
@@ -43,12 +43,17 @@ the mute flag on the endpoint does not move and the device keeps streaming — s
 muted silence reads a small constant floor around 0.0002 while speech runs 0.03
 to 0.14. Speech is a threshold, not a comparison against zero.
 
-**Who holds the microphone** — `CapabilityAccessManager`'s consent store in the
-registry, one subkey per application, `LastUsedTimeStop` zero while capture is
-open. This is the bookkeeping behind the microphone icon in the tray, and it
-answers "is Granola recording, or merely running" without any Granola API. It
-also tells a meeting from a game: if Discord holds the microphone, nobody wants
-a transcript.
+**Who holds the microphone** - the audio sessions on every active capture
+endpoint (`IAudioSessionManager2`), the same list the volume mixer is built on.
+A session whose state is Active is a process capturing right now; its PID gives
+the executable name. That answers "is Granola recording, or merely running"
+without any Granola API, and tells a meeting from a game: if Discord holds the
+microphone, nobody wants a transcript.
+
+Until November 2026 this came from `CapabilityAccessManager`'s consent store in
+the registry. Windows 11 26H2 (build 26300) stopped writing it: its entries
+froze in October while Granola kept recording, and every recorded call got the
+"Granola is not recording" reminder.
 
 ## How it decides
 
@@ -115,12 +120,9 @@ register, which Go's syscall bridge cannot fill.
 
 ## What the consent store is still for
 
-`CapabilityAccessManager` records one session per application, with
-`LastUsedTimeStop` zero while capture is open. It answers two questions the
-level cannot: whether Granola is recording rather than merely running - checked
-against a real 31-minute call and against Granola sitting open and idle, which
-holds no microphone at all - and whether Discord has the microphone, which calls
-the reminder off.
+Only for finding `Granola.exe` for the tray's "open Granola": the store keeps the
+full path of everything that ever asked for the microphone. `granag list` still
+prints its history, frozen since the 26H2 update.
 
 ## Not done yet
 

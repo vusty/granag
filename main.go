@@ -139,8 +139,8 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-// list prints what the two probes see right now: the capture endpoints with a
-// live level, and every microphone session Windows remembers.
+// list prints what the probes see right now: the capture endpoints with a live
+// level, the processes capturing from them, and the consent store's history.
 func list() error {
 	devs, err := mic.Devices()
 	if err != nil {
@@ -162,6 +162,23 @@ func list() error {
 		fmt.Printf("  %-34s  peak %.4f\n", d.Name, peak)
 	}
 
+	caps, err := mic.Capturing()
+	if err != nil {
+		return err
+	}
+	fmt.Println("\nCapturing right now (what the reminder decides on)")
+	if len(caps) == 0 {
+		fmt.Println("  nobody")
+	}
+	self := uint32(os.Getpid())
+	for _, c := range caps {
+		mark := ""
+		if c.PID == self {
+			mark = "  (this process)"
+		}
+		fmt.Printf("  %-26s  pid %-6d  %s%s\n", c.Exe, c.PID, c.Device, mark)
+	}
+
 	holders, err := consent.Holders()
 	if err != nil {
 		return err
@@ -173,7 +190,7 @@ func list() error {
 		return holders[i].Started.After(holders[j].Started)
 	})
 
-	fmt.Println("\nMicrophone sessions, most recent first")
+	fmt.Println("\nConsent store history, most recent first (frozen since the 26H2 update)")
 	for _, h := range holders {
 		when := h.Started.Format("01-02 15:04:05")
 		if h.Holding() {
@@ -277,7 +294,7 @@ func run(args []string) error {
 	repeats := fs.String("repeats", durations(cfg.Repeats),
 		"comma-separated gaps after the first reminder; their count caps reminders per conversation, and empty means remind once")
 	fs.StringVar(&o.device, "device", o.device, "match this capture device by name")
-	fs.DurationVar(&o.every, "poll", 2*time.Second, "how often to read the level and the consent store")
+	fs.DurationVar(&o.every, "poll", 2*time.Second, "how often to read the level and who is capturing")
 	fs.Float64Var(&o.threshold, "on-threshold", micOnThreshold,
 		"level above which the microphone counts as unmuted")
 	fs.BoolVar(&o.dry, "dry-run", false, "log reminders instead of showing them")
@@ -446,15 +463,10 @@ func poll(ctx context.Context, state *nag.State, o runOpts) error {
 		}
 		micOn := float64(peak) > o.threshold
 
-		active, err := consent.Active()
+		names, err := mic.CapturingExes()
 		if err != nil {
 			return err
 		}
-		names := make([]string, 0, len(active))
-		for _, h := range active {
-			names = append(names, h.Exe)
-		}
-		sort.Strings(names)
 
 		remind := state.Update(time.Now(), micOn, names)
 
@@ -651,17 +663,12 @@ func logf(format string, args ...any) {
 }
 
 func holders() string {
-	active, err := consent.Active()
+	names, err := mic.CapturingExes()
 	if err != nil {
 		return "error: " + err.Error()
 	}
-	if len(active) == 0 {
-		return "—"
+	if len(names) == 0 {
+		return "-"
 	}
-	names := make([]string, 0, len(active))
-	for _, h := range active {
-		names = append(names, h.Exe)
-	}
-	sort.Strings(names)
 	return strings.Join(names, ", ")
 }

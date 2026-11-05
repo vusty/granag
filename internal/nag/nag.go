@@ -115,7 +115,7 @@ func (s *State) Paused() bool {
 // Update reports whether to remind now.
 //
 // micOn is whether the microphone is unmuted, read from its level; holders are
-// the executables capturing it, as the consent store spells them. Reminders
+// the executables capturing it, by file name ("Granola.exe"). Reminders
 // stop as soon as Granola takes the microphone, and the counter resets when the
 // microphone goes quiet, so the next conversation starts from a clean slate.
 func (s *State) Update(now time.Time, micOn bool, holders []string) bool {
