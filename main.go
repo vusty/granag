@@ -8,6 +8,7 @@
 //	granag list    every capture device and every microphone session
 //	granag watch   a one-line-per-second timeline of level and holders
 //	granag toast   fire one notification, to prove toasts reach the screen
+//	granag beacon  show the red alert icon for a while, to prove it lands on the taskbar
 //
 // list and watch are the probes the detector was designed against, kept
 // because they are the only way to tell a broken reading from a quiet room.
@@ -97,6 +98,10 @@ func main() {
 		if err := autostartCmd(os.Args[2:]); err != nil {
 			fail(err)
 		}
+	case "beacon":
+		if err := beaconCmd(os.Args[2:]); err != nil {
+			fail(err)
+		}
 	case "toast":
 		if err := (notify.Toast{
 			Title: "granag",
@@ -110,7 +115,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast|autostart> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast|beacon|autostart> [flags]")
 	os.Exit(2)
 }
 
@@ -277,6 +282,7 @@ type runOpts struct {
 	keepVolume  bool
 	volumeEvery time.Duration
 	status      func(string)
+	alert       func(bool)
 	held        func()
 }
 
@@ -343,6 +349,12 @@ func run(args []string) error {
 	}
 
 	o.status = tray.SetStatus
+	if b, err := tray.NewBeacon(logf); err != nil {
+		logf("alert icon unavailable: %v", err)
+	} else {
+		defer b.Close()
+		o.alert = b.Set
+	}
 	go keepPolling(ctx, state, o)
 
 	tray.Run(tray.Options{
@@ -388,6 +400,9 @@ func keepPolling(ctx context.Context, state *nag.State, o runOpts) {
 		}
 		if o.status != nil {
 			o.status("микрофон не найден, жду")
+		}
+		if o.alert != nil {
+			o.alert(false)
 		}
 		select {
 		case <-ctx.Done():
@@ -488,6 +503,11 @@ func poll(ctx context.Context, state *nag.State, o runOpts) error {
 				o.status("слежу за микрофоном")
 			}
 		}
+		// The red icon shows the state itself, from the first poll that sees
+		// it: no debounce and no cap, unlike the toasts.
+		if o.alert != nil {
+			o.alert(state.Live() && !state.Paused())
+		}
 		if !remind {
 			continue
 		}
@@ -502,6 +522,24 @@ func poll(ctx context.Context, state *nag.State, o runOpts) error {
 			logf("toast failed: %v", err)
 		}
 	}
+}
+
+// beaconCmd shows the red alert icon for a while, to prove it lands on the
+// taskbar rather than in the overflow behind the arrow.
+func beaconCmd(args []string) error {
+	fs := flag.NewFlagSet("beacon", flag.ExitOnError)
+	d := fs.Duration("for", 15*time.Second, "how long to show the icon")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	b, err := tray.NewBeacon(logf)
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+	b.Set(true)
+	time.Sleep(*d)
+	return nil
 }
 
 // keepVolume puts every active capture device back to full input volume.

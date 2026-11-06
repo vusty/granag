@@ -17,6 +17,7 @@ remember by hand.
     granag run -repeats ""  remind once per conversation instead of twice
     granag autostart on     start at logon, through the Run key
     granag toast            fire one notification, to prove toasts reach the screen
+    granag beacon           show the red alert icon for 15 seconds, to prove it lands on the taskbar
     granag list             capture devices with their level, and who is capturing from them
     granag watch            one line a second: level, whether it counts as speech, who holds the mic
 
@@ -26,6 +27,16 @@ the audio sessions every two seconds.
 The tray icon is green while reminders are on and grey while paused, and its
 menu opens Granola, pauses, pauses for an hour, or quits. The hourly pause
 exists because a plain toggle gets left off.
+
+A second icon, a red microphone, sits on the taskbar next to the clock only
+while the microphone is live and Granola is not recording it: from the first
+poll that sees it, with no debounce and no cap, gone as soon as the microphone
+is muted, Granola takes it, Discord holds it, or reminders are paused. Windows
+11 puts every new tray icon in the overflow behind the arrow and has no API to
+ask otherwise, so after each add granag sets `IsPromoted = 1` on its own entry
+under `HKCU\Control Panel\NotifyIconSettings`, which is what the switch in
+Settings writes; Explorer picks it up at once. Switching the icon off in
+Settings therefore does not stick. The menu icon stays where it was.
 
 Build from WSL, run on Windows:
 
