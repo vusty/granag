@@ -1,4 +1,4 @@
-# granag
+# Granag
 
 Short for granola-nag.
 
@@ -33,7 +33,7 @@ while the microphone is live and Granola is not recording it: from the first
 poll that sees it, with no debounce and no cap, gone as soon as the microphone
 is muted, Granola takes it, Discord holds it, or reminders are paused. Windows
 11 puts every new tray icon in the overflow behind the arrow and has no API to
-ask otherwise, so after each add granag sets `IsPromoted = 1` on its own entry
+ask otherwise, so after each add Granag sets `IsPromoted = 1` on its own entry
 under `HKCU\Control Panel\NotifyIconSettings`, which is what the switch in
 Settings writes; Explorer picks it up at once. Switching the icon off in
 Settings therefore does not stick. The menu icon stays where it was.

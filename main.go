@@ -104,7 +104,7 @@ func main() {
 		}
 	case "toast":
 		if err := (notify.Toast{
-			Title: "granag",
+			Title: "Granag",
 			Body:  "Тестовое уведомление — значит тосты работают.",
 		}).Show(); err != nil {
 			fail(err)
@@ -602,6 +602,9 @@ func openGranola() error {
 
 const autostartKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 
+// runValue is the name of the entry under autostartKey.
+const runValue = "Granag"
+
 // autostartCmd turns logon startup on and off through the Run key. A registry
 // value needs no COM, unlike a Start Menu shortcut, and Windows honours it the
 // same way.
@@ -634,17 +637,22 @@ func autostartCmd(args []string) error {
 			}
 			value += " " + arg
 		}
-		if err := k.SetStringValue("granag", value); err != nil {
+		// Value names ignore case, and overwriting one keeps the case it was
+		// created with, so a value left by an older build has to go first.
+		if err := k.DeleteValue(runValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return err
+		}
+		if err := k.SetStringValue(runValue, value); err != nil {
 			return err
 		}
 		fmt.Println("autostart on:", value)
 	case "off":
-		if err := k.DeleteValue("granag"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		if err := k.DeleteValue(runValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
 			return err
 		}
 		fmt.Println("autostart off")
 	case "status":
-		v, _, err := k.GetStringValue("granag")
+		v, _, err := k.GetStringValue(runValue)
 		if errors.Is(err, registry.ErrNotExist) {
 			fmt.Println("autostart off")
 			return nil

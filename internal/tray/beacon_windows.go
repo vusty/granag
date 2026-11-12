@@ -25,7 +25,7 @@ var iconAlert []byte
 // systray - stays in the overflow.
 const beaconUID = 1
 
-const beaconTip = "granag: микрофон включён, Granola не пишет"
+const beaconTip = "Granag: микрофон включён, Granola не пишет"
 
 const (
 	wmDestroy = 0x0002

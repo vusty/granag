@@ -38,6 +38,7 @@ var mu sync.Mutex
 // Run shows the icon and blocks until the user quits. It must be called on the
 // main goroutine: the tray owns a window message loop.
 func Run(o Options) {
+	followMenuTheme()
 	systray.Run(func() { ready(o) }, o.OnQuit)
 }
 
@@ -45,12 +46,12 @@ func Run(o Options) {
 func SetStatus(s string) {
 	mu.Lock()
 	defer mu.Unlock()
-	systray.SetTooltip("granag — " + s)
+	systray.SetTooltip("Granag: " + s)
 }
 
 func ready(o Options) {
 	systray.SetIcon(iconListening)
-	systray.SetTitle("granag")
+	systray.SetTitle("Granag")
 	SetStatus("слежу за разговорами")
 
 	open := systray.AddMenuItem("Открыть Granola", "")
