@@ -24,7 +24,7 @@ remember by hand.
 Idle it sits at about 14 MB and no measurable CPU: the work is one pass over
 the audio sessions every two seconds.
 
-The tray icon is green while reminders are on and grey while paused, and its
+The tray icon is a studio microphone, faded while reminders are paused, and its
 menu opens Granola, pauses, pauses for an hour, or quits. The hourly pause
 exists because a plain toggle gets left off.
 
@@ -41,6 +41,10 @@ Settings therefore does not stick. The menu icon stays where it was.
 Build from WSL, run on Windows:
 
     GOOS=windows GOARCH=amd64 go build -o granag.exe .
+
+The icons are Google's Noto Emoji studio microphone, drawn by
+`internal/tray/icons/make.py`. The exe carries the same icon through
+`rsrc_windows_amd64.syso`, which is committed, so a plain `go build` picks it up.
 
 ## What the probes read
 
