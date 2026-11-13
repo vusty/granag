@@ -9,6 +9,7 @@
 //	granag watch   a one-line-per-second timeline of level and holders
 //	granag toast   fire one notification, to prove toasts reach the screen
 //	granag beacon  show the red alert icon for a while, to prove it lands on the taskbar
+//	granag calls   the call log by day: how long each call ran, and how much of it the microphone was live
 //
 // list and watch are the probes the detector was designed against, kept
 // because they are the only way to tell a broken reading from a quiet room.
@@ -33,6 +34,7 @@ import (
 
 	ole "github.com/go-ole/go-ole"
 
+	"github.com/vusty/granag/internal/calls"
 	"github.com/vusty/granag/internal/consent"
 	"github.com/vusty/granag/internal/mic"
 	"github.com/vusty/granag/internal/nag"
@@ -102,6 +104,10 @@ func main() {
 		if err := beaconCmd(os.Args[2:]); err != nil {
 			fail(err)
 		}
+	case "calls":
+		if err := callsCmd(os.Args[2:]); err != nil {
+			fail(err)
+		}
 	case "toast":
 		if err := (notify.Toast{
 			Title: "Granag",
@@ -115,7 +121,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|toast|beacon|autostart> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: granag <run|list|watch|calls|toast|beacon|autostart> [flags]")
 	os.Exit(2)
 }
 
@@ -284,6 +290,7 @@ type runOpts struct {
 	status      func(string)
 	alert       func(bool)
 	held        func()
+	calls       *callLog
 }
 
 // run is the reminder itself: hold the microphone open so its level can be
@@ -310,9 +317,14 @@ func run(args []string) error {
 		"how long the microphone must stay live before the first reminder")
 	fs.StringVar(&cfg.Granola, "granola", cfg.Granola,
 		"executable whose grip on the microphone means the conversation is being recorded")
+	callsPath := fs.String("calls", defaultCallsPath(), "append finished calls to this file; empty turns the call log off")
+	callCfg := calls.DefaultConfig()
+	callApps := fs.String("call-apps", strings.Join(callCfg.Apps, ","),
+		"comma-separated executables whose grip on the microphone means a call")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	callCfg.Apps = splitList(*callApps)
 	cfg.Suppress = splitList(*suppress)
 	var err error
 	if cfg.Repeats, err = parseDurations(*repeats); err != nil {
@@ -328,6 +340,16 @@ func run(args []string) error {
 		}
 		defer f.Close()
 		logOut = f
+	}
+
+	if *callsPath != "" {
+		l, err := newCallLog(*callsPath, callCfg)
+		if err != nil {
+			logf("call log off: %v", err)
+		} else {
+			o.calls = l
+			logf("logging calls to %s, held by %s", *callsPath, strings.Join(callCfg.Apps, ", "))
+		}
 	}
 
 	state := nag.New(cfg)
@@ -355,7 +377,11 @@ func run(args []string) error {
 		defer b.Close()
 		o.alert = b.Set
 	}
-	go keepPolling(ctx, state, o)
+	polled := make(chan struct{})
+	go func() {
+		keepPolling(ctx, state, o)
+		close(polled)
+	}()
 
 	tray.Run(tray.Options{
 		OnPause: func(paused bool) {
@@ -371,6 +397,11 @@ func run(args []string) error {
 	})
 
 	cancel()
+	// Let the poller write the call under way before the process ends.
+	select {
+	case <-polled:
+	case <-time.After(5 * time.Second):
+	}
 	return nil
 }
 
@@ -384,6 +415,9 @@ func run(args []string) error {
 func keepPolling(ctx context.Context, state *nag.State, o runOpts) {
 	var last string
 	o.held = func() { last = "" }
+	if o.calls != nil {
+		defer o.calls.stop()
+	}
 	for {
 		err := poll(ctx, state, o)
 		if ctx.Err() != nil {
@@ -483,7 +517,11 @@ func poll(ctx context.Context, state *nag.State, o runOpts) error {
 			return err
 		}
 
-		remind := state.Update(time.Now(), micOn, names)
+		now := time.Now()
+		if o.calls != nil {
+			o.calls.observe(now, micOn, names)
+		}
+		remind := state.Update(now, micOn, names)
 
 		if live := state.Live(); live != wasLive {
 			if live {

@@ -20,6 +20,7 @@ remember by hand.
     granag beacon           show the red alert icon for 15 seconds, to prove it lands on the taskbar
     granag list             capture devices with their level, and who is capturing from them
     granag watch            one line a second: level, whether it counts as speech, who holds the mic
+    granag calls            the call log by day; -days to look further back
 
 Idle it sits at about 14 MB and no measurable CPU: the work is one pass over
 the audio sessions every two seconds.
@@ -132,6 +133,34 @@ and every thirty seconds after. `-keep-volume=false` turns that off.
 It gets there by stepping the volume up rather than by setting a value: the
 setters take a float by value, and on amd64 a float argument travels in an XMM
 register, which Go's syscall bridge cannot fill.
+
+## The call log
+
+`run` also keeps a log of calls, because a call that felt like twenty minutes
+turns out to be two hours and nothing else measures it. One JSON line per
+finished call goes to `%LOCALAPPDATA%\granag\calls.jsonl`:
+
+    {"start":"2026-11-13T17:40:56+05:00","end":"2026-11-13T18:38:56+05:00",
+     "seconds":3480,"mic_live_seconds":720,"apps":{"Discord.exe":3480,"Granola.exe":3420}}
+
+A call is any stretch during which a call application holds the microphone:
+Chrome (Meet), Edge, Discord, Telegram, or Granola, whose recording is the only
+sign of a meeting in the room. The tap sensor never reaches Windows, so a call
+application keeps capturing through the whole call however long one sits muted,
+and the call is counted all the same. `mic_live_seconds` is the part with the
+microphone unmuted, which with a hardware mute that only comes off to talk is
+close to the time spent talking. NVIDIA Broadcast is not a call application: it
+holds the QuadCast whenever anything listens to its virtual microphone.
+
+A drop shorter than a minute stays one call, and a capture shorter than a minute
+is not one. A gap of more than a minute between polls is sleep: the open call
+ends where the polls stopped. Windows kills a tray application at logoff without
+letting it stop, so the call under way is saved to `calls.jsonl.open` every
+minute and written to the log on the next start. `-calls ""` turns the log off,
+`-call-apps` changes the list.
+
+Muting inside Discord or Meet instead of on the microphone may make the
+application let go of the device. Granola recording the call holds it anyway.
 
 ## What the consent store is still for
 
